@@ -1,0 +1,279 @@
+---
+title: "Temp"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r code template}
+
+library(tidyverse) # the usual stuff: dplyr, readr, and other goodies
+library(lubridate) # to handle dates
+library(GGally) # for correlation-scatter plot matrix
+library(ggfortify) # to produce residual diagnostic plots
+library(rsample) # to split dataframe in training- & testing sets
+library(janitor) # clean_names()
+library(broom) # use broom:augment() to get tidy table with regression output, residuals, etc
+library(huxtable) # to get summary table of all models produced
+library(caret) # to train more advanced models (k-fold cross-validation, stepwise regression, LASSO)
+library(nnet) # to calculate the maximum value of a vector
+library(pROC) # to plot ROC curves
+library(MLmetrics) #for caret LASSO logistic regression
+library(sampling)
+library(knitr)
+library(vroom)
+library(skimr)
+library(sf)
+
+```
+
+```{r}
+# read many CSV files
+# Adapted from https://www.gerkelab.com/blog/2018/09/import-directory-csv-purrr-readr/
+
+# assuming all your files are within a directory called 'data/stop-search'
+data_dir <- "data/stop-search"
+
+files <- fs::dir_ls(path = data_dir, regexp = "\\.csv$", recurse = TRUE) 
+#recurse=TRUE will recursively look for files further down into any folders
+
+files
+
+#read them all in using vroom::vroom()
+stop_search_data <- vroom(files, id = "source")
+
+# Uncomment the following lines if you want to see how much faster vroom is
+
+# library(microbenchmark)
+# mbm = microbenchmark(
+#   readr =  map_dfr(files, read_csv, .id = "source"),
+#   vroom =  vroom(files, id = "source"),
+#   times=10
+# )
+# mbm
+
+# Unit: milliseconds
+# expr       min        lq      mean    median        uq       max neval cld
+# readr 3676.9319 3761.8027 3944.5699 3791.1760 4055.4460 4626.9870    10   b
+# vroom  855.9414  864.9085  910.1052  905.8456  948.0134  975.8617    10  a 
+
+#read them all in using vroom::vroom()
+stop_search_data <- vroom(files, id = "source")
+
+
+
+# Use janitor to clean names, and add more variables
+stop_search_all <- stop_search_data %>%
+  janitor::clean_names() %>% 
+  mutate(month = month(date),
+         month_name = month(date, label=TRUE, abbr = TRUE),
+         year= year(date),
+         month_year = paste0(year, "-",month_name)
+  ) %>% 
+
+# rename longitude/latitude to lng/lat
+rename(lng = longitude,
+       lat = latitude)
+  
+# skimr::skim() to inspect and get a feel for the data         
+skim(stop_search_all)
+
+# some quick counts...
+stop_search_all %>% 
+  count(gender, sort=TRUE)
+
+stop_search_all %>% 
+  count(object_of_search, sort=TRUE)
+
+stop_search_all %>% 
+  count(officer_defined_ethnicity, sort=TRUE)
+
+stop_search_all %>% 
+  count(age_range)
+
+
+
+# concentrate in top  searches, age_ranges, and officer defined ethnicities
+which_searches <- c("Controlled drugs", "Offensive weapons","Stolen goods" )
+which_ages <- c("10-17", "18-24","25-34", "over 34")
+which_ethnicity <- c("White", "Black", "Asian")
+
+stop_search_offence <- stop_search_all %>% 
+  
+  # filter out those stop-and-search where no further action was taken
+  filter(outcome != "A no further action disposal") %>% 
+  
+  #filter out those rows with no latitude/longitude
+  drop_na(lng,lat) %>% 
+  
+  # concentrate in top searches, age_ranges, and officer defined ethnicities
+  filter(object_of_search %in% which_searches) %>% 
+  filter(age_range %in% which_ages) %>% 
+  filter(officer_defined_ethnicity %in% which_ethnicity) %>% 
+  
+  # relevel factors so everything appears in correct order
+  mutate(
+    object_of_search = fct_relevel(object_of_search, 
+                                   c("Controlled drugs", "Offensive weapons","Stolen goods")), 
+    age_range = fct_relevel(age_range, 
+                            c("10-17", "18-24", "25-34", "over 34")), 
+    officer_defined_ethnicity = fct_relevel(officer_defined_ethnicity, 
+                                            c("White", "Black", "Asian"))
+  )
+
+
+# make it a shape file using WGS84 lng/lat coordinates
+stop_search_offence_sf <-  st_as_sf(stop_search_offence, 
+                              coords=c('lng', 'lat'), 
+                              crs = 4326)
+
+st_geometry(stop_search_offence_sf) # what is the geometry ?
+# stop_search_offence_sf = geographic CRS: WGS 84
+
+# make sure you have the same direcory stucture to get London wards shapefile
+london_wards_sf <- read_sf(here::here("data/London-wards-2018_ESRI","London_Ward.shp"))
+
+st_geometry(london_wards_sf) # what is the geometry ?
+# london_wards_sf = projected CRS:  OSGB 1936 / British National Grid
+
+# change the CRS to use WGS84 lng/lat pairs
+london_wgs84 <-  london_wards_sf %>% 
+  st_transform(4326) # transform CRS to WGS84, latitude/longitude
+
+st_geometry(london_wgs84) # what is the geometry ?
+```
+
+```{r cleaning 2}
+
+lc_clean<- lc_raw %>%
+  dplyr::select(-x20:-x80) %>% #delete empty columns
+  filter(!is.na(int_rate)) %>%   #delete empty rows
+  mutate(
+    issue_d = mdy(issue_d),  # lubridate::mdy() to fix date format
+    term = factor(term_months),     # turn 'term' into a categorical variable
+    delinq_2yrs = factor(delinq_2yrs) # turn 'delinq_2yrs' into a categorical variable
+  ) %>% 
+  mutate(default = dplyr::recode(loan_status, 
+                      "Charged Off" = "1", 
+                      "Fully Paid" = "0"))%>%
+    mutate(default = as.factor(default)) %>%
+  dplyr::select(-emp_title,-installment, -term_months, everything()) #move some not-so-important variables to the end. 
+
+
+```
+
+
+```{r visualization 1}
+#bar chart of defaults
+def_vis1<-ggplot(data=lc_clean, aes(x=default)) +geom_bar(aes(y = (..count..)/sum(..count..))) + labs(x="Default, 1=Yes, 0=No", y="relative frequencies") +scale_y_continuous(labels=scales::percent) +geom_text(aes( label = scales::percent((..count..)/sum(..count..) ),y=(..count..)/sum(..count..) ), stat= "count",vjust=-0.5) 
+def_vis1
+
+#bar chart of defaults per loan grade
+def_vis2<-ggplot(data=lc_clean, aes(x=default), group=grade) +geom_bar(aes(y = (..count..)/sum(..count..), fill = factor(..x..)), stat="count")  + labs(title="Defaults by Grade", x="Default, 1=Yes, 0=No", y="relative frequencies") +scale_y_continuous(labels=scales::percent) +facet_grid(~grade) + theme(legend.position = "none") +geom_text(aes( label = scales::percent((..count..)/sum(..count..) ),y=(..count..)/sum(..count..) ), stat= "count",vjust=-0.5) 
+def_vis2
+
+#bar chart of defaults per number of Delinquencies
+def_vis3<-lc_clean %>%
+  filter(as.numeric(delinq_2yrs)<4) %>%
+  ggplot(aes(x=default), group=delinq_2yrs) +geom_bar(aes(y = (..count..)/sum(..count..), fill = factor(..x..)), stat="count")  + labs(title="Defaults by Number of Delinquencies", x="Default, 1=Yes, 0=No", y="relative frequencies")  +scale_y_continuous(labels=scales::percent) +facet_grid(~delinq_2yrs) + theme(legend.position = "none") +geom_text(aes( label = scales::percent((..count..)/sum(..count..) ),y=(..count..)/sum(..count..) ), stat= "count",vjust=-0.5)
+
+def_vis3
+
+#scatter plots 
+
+#We select 2000 random loans to display only to make the display less busy. 
+set.seed(1234)
+reduced<-lc_clean[sample(0:nrow(lc_clean), 2000, replace = FALSE),]%>%
+  mutate(default=as.numeric(default)-1) # also convert default to a numeric {0,1} to make it easier to plot.
+
+          
+# scatter plot of defaults against loan amount                         
+def_vis4<-ggplot(data=reduced, aes(y=default,x=I(loan_amnt/1000)))  + labs(y="Default, 1=Yes, 0=No", x="Loan Amnt (1000 $)") +geom_jitter(width=0, height=0.05, alpha=0.7) #We use jitter to offset the display of defaults/non-defaults to make the data easier to interpert. We have also changed the amount to 1000$ to reduce the number of zeros on the horizontal axis.
+
+def_vis4
+
+#scatter plot of defaults against loan amount.
+def_vis5<-ggplot(data=reduced, aes(y=default,x=I(annual_inc/1000)))   + labs(y="Default, 1=Yes, 0=No", x="Annual Income(1000 $)") +geom_jitter(width=0, height=0.05, alpha=0.7) +  xlim(0,400)
+
+def_vis5
+
+
+
+# correlation table using GGally::ggcor()
+# this takes a while to plot
+
+lc_clean %>% 
+    mutate(default=as.numeric(default)-1)%>%
+  select(loan_amnt, dti, annual_inc, default) %>% #keep Y variable last
+ ggcorr(method = c("pairwise", "pearson"), label_round=2, label = TRUE)
+```
+
+
+
+```{r, Visualization 4}
+
+stop_search_plot4 <- stop_search_all %>% 
+  filter(!is.na(outcome),!is.na(object_of_search), object_of_search == c("Controlled drugs", "Offensive weapons","Stolen goods" ), outcome != "Caution (simple or conditional)", outcome != "A no further action disposal" ) %>% 
+  select(object_of_search, outcome) %>% 
+  group_by(object_of_search, outcome) %>% 
+  count (object_of_search)
+
+stop_search_plot4[stop_search_plot4 == "Community resolution"] <- "Community"
+stop_search_plot4[stop_search_plot4 == "Penalty Notice for Disorder"] <- "Penalty notice"
+stop_search_plot4[stop_search_plot4 == "Summons / charged by post"] <- "Summon"
+
+
+ggplot(stop_search_plot4, aes(x=as.factor(outcome), y = n)) +
+  geom_col() +
+  facet_wrap(~object_of_search) +
+  theme_classic() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 0.8))+
+  labs(x="Action Taken", y="Count", title = "Cops choose most community resolution for drug cases", subtitle = "Action taken for types of offences")
+
+```
+
+```{r, correlation table, warning=FALSE, message=FALSE}
+
+# correlation table using GGally::ggcor()
+# this takes a while to plot
+
+lc_clean %>% 
+    mutate(default=as.numeric(default)-1)%>%
+  select(loan_amnt, dti, annual_inc, default) %>% #keep Y variable last
+ ggcorr(method = c("pairwise", "pearson"), label_round=2, label = TRUE)
+
+```
+
+```{r, linear and logisitc regression with binary response variable, warning=FALSE}
+
+model_lm<-lm(as.numeric(default)~I(annual_inc/1000), lc_clean)
+summary(model_lm)
+
+
+logistic1<-glm(default~I(annual_inc/1000), family="binomial", lc_clean)
+summary(logistic1)
+
+
+ggplot(data=reduced, aes(x=I(annual_inc/1000), y=default)) + geom_smooth(method="lm", se=0, aes(color="OLS"))+ geom_smooth(method = "glm", method.args = list(family = "binomial"),  se=0, aes(color="Logistic"))+ labs(y="Prob of Default", x="Annual Income(1000 $)")+  xlim(0,450)+scale_y_continuous(labels=scales::percent)+geom_jitter(width=0, height=0.05, alpha=0.7) + scale_colour_manual(name="Fitted Model", values=c("blue", "red"))
+
+
+knitr::opts_chunk$set(error = TRUE)
+logistic2 <-  glm(default~annual_inc + term + grade + loan_amnt, family="binomial", lc_clean)
+summary(logistic2)
+
+#compare the fit of logistic 1 and logistic 2
+anova(logistic1,logistic2)
+
+lmHeight = lm(height~age, data = ageandheight) 
+
+summary(lmHeight)
+
+plot(lmTemp$residuals, pch = 16, col = "red")
+
+
+```
+
