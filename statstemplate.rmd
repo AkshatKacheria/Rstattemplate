@@ -250,6 +250,15 @@ lc_clean %>%
 
 ```{r, linear and logisitc regression with binary response variable, warning=FALSE}
 
+
+#datasplitting
+set.seed(1234)
+train_test_split <- initial_split(lc_clean, prop = 0.8)
+testing <- testing(train_test_split) #20% of the data is set aside for testing
+training <- training(train_test_split) #80% of the data is set aside for training
+
+logistic2_out<-glm(default~annual_inc + term + grade + loan_amnt, family="binomial", training)
+
 model_lm<-lm(as.numeric(default)~I(annual_inc/1000), lc_clean)
 summary(model_lm)
 
